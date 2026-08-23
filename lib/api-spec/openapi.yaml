@@ -1,0 +1,127 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: classification
+    description: Customer-support classification
+paths:
+  /llm/healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /llm/classify:
+    post:
+      operationId: classifySupportMessage
+      tags: [classification]
+      summary: Classify a customer-support message
+      description: Classifies support text through a validated LLM provider adapter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SupportMessageInput"
+      responses:
+        "200":
+          description: Validated classification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClassificationResult"
+        "400":
+          description: Invalid input
+        "503":
+          description: LLM disabled or unavailable
+        "504":
+          description: Provider timeout
+        "502":
+          description: Invalid provider output or upstream failure
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    SupportMessageInput:
+      type: object
+      additionalProperties: false
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+      required:
+        - text
+    ClassificationResult:
+      type: object
+      additionalProperties: false
+      properties:
+        category:
+          type: string
+          enum: [billing, bug, feature, other]
+        urgency:
+          type: string
+          enum: [low, normal, high]
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 240
+        metadata:
+          $ref: "#/components/schemas/ClassificationMetadata"
+      required:
+        - category
+        - urgency
+        - confidence
+        - reason
+        - metadata
+    ClassificationMetadata:
+      type: object
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+        model:
+          type: string
+        duration_ms:
+          type: number
+        cache_hit:
+          type: boolean
+        retries:
+          type: number
+        input_tokens:
+          type: ["number", "null"]
+        output_tokens:
+          type: ["number", "null"]
+      required:
+        - provider
+        - model
+        - duration_ms
+        - cache_hit
+        - retries
+        - input_tokens
+        - output_tokens
+

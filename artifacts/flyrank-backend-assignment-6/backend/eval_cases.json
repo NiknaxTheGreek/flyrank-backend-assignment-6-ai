@@ -1,0 +1,14 @@
+[
+  {"id": "billing-refund", "text": "I was charged twice and need a refund.", "category": "billing", "urgency": "normal"},
+  {"id": "billing-urgent", "text": "Urgent: my card was charged after I cancelled.", "category": "billing", "urgency": "high"},
+  {"id": "billing-low", "text": "No rush, could you explain this invoice line?", "category": "billing", "urgency": "low"},
+  {"id": "bug-crash", "text": "The mobile app crashes every time I open it.", "category": "bug", "urgency": "normal"},
+  {"id": "bug-access", "text": "I cannot access the dashboard after the update; urgent help needed.", "category": "bug", "urgency": "high"},
+  {"id": "bug-low", "text": "When you can, a button is broken in my profile.", "category": "bug", "urgency": "low"},
+  {"id": "feature-export", "text": "Please add a CSV export feature.", "category": "feature", "urgency": "normal"},
+  {"id": "feature-integration", "text": "We would love an integration with our calendar.", "category": "feature", "urgency": "normal"},
+  {"id": "feature-low", "text": "No rush, please support dark mode.", "category": "feature", "urgency": "low"},
+  {"id": "other-thanks", "text": "Thank you for the helpful onboarding guide.", "category": "other", "urgency": "normal"},
+  {"id": "other-low", "text": "Just curious: where can I find your status page?", "category": "other", "urgency": "low"},
+  {"id": "other-high", "text": "Urgent: I need an account manager to call me immediately.", "category": "other", "urgency": "high"}
+]

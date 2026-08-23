@@ -1,0 +1,36 @@
+kind = "web"
+previewPath = "/"
+title = "FlyRank Assignment 6"
+description = "A self-contained customer-support classification service and browser console. It demonstrates a safe FastAPI LLM adapter with validated structured outputs, deterministic stub mode, caching, retries, kill-switch controls, an evaluation runner, and verification evidence."
+version = "1.0.0"
+id = "artifacts/flyrank-backend-assignment-6"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25846
+
+[services.development]
+run = "pnpm --filter @workspace/flyrank-backend-assignment-6 run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/flyrank-backend-assignment-6", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/flyrank-backend-assignment-6/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25846"
+BASE_PATH = "/"
+
+[[services]]
+name = "FastAPI service"
+paths = [ "/llm", "/api/llm" ]
+localPort = 8000
+
+[services.development]
+run = "PYTHONPATH=artifacts/flyrank-backend-assignment-6 uv run python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"

@@ -1,0 +1,165 @@
+{
+  "mode": "stub",
+  "case_count": 12,
+  "category_accuracy": 0.9166666666666666,
+  "urgency_accuracy": 1.0,
+  "joint_accuracy": 0.9166666666666666,
+  "cases": [
+    {
+      "id": "billing-refund",
+      "expected": {
+        "category": "billing",
+        "urgency": "normal"
+      },
+      "observed": {
+        "category": "billing",
+        "urgency": "normal"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "billing-urgent",
+      "expected": {
+        "category": "billing",
+        "urgency": "high"
+      },
+      "observed": {
+        "category": "billing",
+        "urgency": "high"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "billing-low",
+      "expected": {
+        "category": "billing",
+        "urgency": "low"
+      },
+      "observed": {
+        "category": "billing",
+        "urgency": "low"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "bug-crash",
+      "expected": {
+        "category": "bug",
+        "urgency": "normal"
+      },
+      "observed": {
+        "category": "bug",
+        "urgency": "normal"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "bug-access",
+      "expected": {
+        "category": "bug",
+        "urgency": "high"
+      },
+      "observed": {
+        "category": "other",
+        "urgency": "high"
+      },
+      "category_correct": false,
+      "urgency_correct": true
+    },
+    {
+      "id": "bug-low",
+      "expected": {
+        "category": "bug",
+        "urgency": "low"
+      },
+      "observed": {
+        "category": "bug",
+        "urgency": "low"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "feature-export",
+      "expected": {
+        "category": "feature",
+        "urgency": "normal"
+      },
+      "observed": {
+        "category": "feature",
+        "urgency": "normal"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "feature-integration",
+      "expected": {
+        "category": "feature",
+        "urgency": "normal"
+      },
+      "observed": {
+        "category": "feature",
+        "urgency": "normal"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "feature-low",
+      "expected": {
+        "category": "feature",
+        "urgency": "low"
+      },
+      "observed": {
+        "category": "feature",
+        "urgency": "low"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "other-thanks",
+      "expected": {
+        "category": "other",
+        "urgency": "normal"
+      },
+      "observed": {
+        "category": "other",
+        "urgency": "normal"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "other-low",
+      "expected": {
+        "category": "other",
+        "urgency": "low"
+      },
+      "observed": {
+        "category": "other",
+        "urgency": "low"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    },
+    {
+      "id": "other-high",
+      "expected": {
+        "category": "other",
+        "urgency": "high"
+      },
+      "observed": {
+        "category": "other",
+        "urgency": "high"
+      },
+      "category_correct": true,
+      "urgency_correct": true
+    }
+  ]
+}
