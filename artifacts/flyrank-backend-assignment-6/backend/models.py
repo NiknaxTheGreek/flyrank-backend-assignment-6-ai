@@ -56,11 +56,14 @@ class ProviderClassification(BaseModel):
 class OperationalMetadata(BaseModel):
     provider: str
     model: str
+    prompt_version: str
     duration_ms: float = Field(ge=0)
     cache_hit: bool
     retries: int = Field(ge=0)
+    repair_attempted: bool = False
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
 
 
 class ClassificationResult(ProviderClassification):

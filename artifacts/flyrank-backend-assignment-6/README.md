@@ -1,8 +1,10 @@
-# FlyRank Backend Assignment 6 — LLM behind an API
+# FlyRank Backend Assignment 6 — Connect to an AI API
 
-A compact FastAPI service for structured customer-support classification, paired with a browser console. The assignment contract is `POST /llm/classify`; the Replit-routed browser endpoint is also available at `POST /api/llm/classify`.
+This submission exposes a small FastAPI classification endpoint that treats model output as untrusted data. The primary contract is `POST /llm/classify`; the Replit-routed alias is `POST /api/llm/classify`.
 
-## Contract
+Start with [`JOB-CARD.md`](JOB-CARD.md): it defines the model job, trusted schema, uncertainty, prompt version, retry/repair policy, kill switch, observability, and failure behaviour.
+
+## Request and trusted response
 
 Request:
 
@@ -10,62 +12,97 @@ Request:
 {"text":"I was charged twice and need a refund."}
 ```
 
-Successful response fields are validated after every provider call:
+A successful response contains:
 
 - `category`: `billing`, `bug`, `feature`, or `other`
 - `urgency`: `low`, `normal`, or `high`
-- `confidence`: numeric, inclusive `0..1`
-- `reason`: concise, input-grounded string
-- `metadata`: provider/model, duration, cache hit, retries, and provider token usage when supplied
+- `confidence`: numeric `0..1`
+- `reason`: concise, non-blank explanation
+- `metadata`: provider, model, prompt version, latency, cache status, transport retries, whether repair was used, token counts, and estimated cost when explicit pricing is configured
 
-Model output is untrusted. Invalid JSON, unexpected fields, invalid enums, out-of-range confidence, or missing fields return a safe `502 invalid_provider_output`.
+The Pydantic schema is the trust boundary. Provider text never bypasses it.
 
-## Run locally
+## Versioned prompt and one repair attempt
+
+The current prompt is `support-classifier-v1` in `backend/prompts.py`.
+
+If the first provider answer is invalid JSON or fails the schema, the service:
+
+1. quarantines the invalid output with an input hash, timestamp, prompt version, and attempt number;
+2. performs **exactly one** repair call;
+3. validates the repair response through the same schema;
+4. returns HTTP **422** if the repaired response is still invalid.
+
+There is no silent coercion and no second repair loop.
+
+## Provider failures and retries
+
+Transport retry is separate from schema repair. Only timeout, rate-limit, and upstream failures are retried, using bounded exponential backoff. Client/request-rejection failures are not retried.
+
+| Situation | Status | Error code |
+| --- | ---: | --- |
+| Invalid body / blank text | 400 | `invalid_input` |
+| Invalid output after one repair | 422 | `invalid_provider_output` |
+| Kill switch disabled | 503 | `llm_disabled` |
+| Provider timeout after retries | 504 | `provider_timeout` |
+| Provider rate limit after retries | 429 | `provider_rate_limited` |
+| Provider outage after retries | 503 | `provider_unavailable` |
+| Provider request/auth rejection | 502 | `provider_rejected` |
+| Unexpected internal failure | 500 | `unexpected_failure` |
+
+## Kill switch
+
+`LLM_ENABLED=false` disables classification without preventing application startup. This remains true even when `LLM_MODE=openai` is selected and no live provider credential exists. `/healthz` still returns healthy and classification returns a controlled `503 llm_disabled` response without contacting a provider.
+
+## Provider modes
+
+`LLM_MODE=stub` is deterministic and is used for tests and credential-free demos.
+
+`LLM_MODE=openai` uses an OpenAI-compatible Responses API with strict JSON Schema output. Credentials are supplied only through environment/managed-secret injection. Replit AI Integrations are supported through the managed base URL/key variables. No credential is committed.
+
+## Observability and cost
+
+The service logs operational metadata only: provider, model, prompt version, duration, cache hit, retries, repair flag, token counts, and estimated cost. It intentionally does **not** log the customer message, API key, Authorization header, or raw provider response.
+
+Cost is only calculated when explicit per-million-token rates are configured. Zero-valued defaults mean no price has been asserted.
+
+## Run
+
+From the repository root:
 
 ```bash
-uv run python -m uvicorn backend.main:app --app-dir artifacts/flyrank-backend-assignment-6 --host 0.0.0.0 --port 8000
+PYTHONPATH=artifacts/flyrank-backend-assignment-6 \
+python -m uvicorn backend.main:app --app-dir artifacts/flyrank-backend-assignment-6 --host 0.0.0.0 --port 8000
+```
+
+Then:
+
+```bash
 curl -X POST http://localhost:8000/llm/classify \
   -H 'content-type: application/json' \
   -d '{"text":"The mobile app crashes after login."}'
 ```
 
-The default is deterministic `stub` mode. Copy `.env.example` and use environment variables; never commit or hard-code credentials.
-
-## OpenAI Responses adapter
-
-Set `LLM_MODE=openai` and optionally set `OPENAI_MODEL`. The adapter calls the OpenAI-compatible Responses API with strict JSON Schema output. It supports either a direct `OPENAI_API_KEY` or Replit AI Integrations: when Replit provides `AI_INTEGRATIONS_OPENAI_BASE_URL` and `AI_INTEGRATIONS_OPENAI_API_KEY`, it selects that managed proxy automatically. Those managed values are provisioned by Replit and must never be copied into source or `.env` files. The adapter uses a finite 30-second default timeout and retries only timeout, HTTP 429, and 5xx-style upstream failures with bounded exponential backoff. It does not retry 400, 401, or 403.
-
-## Failure behavior
-
-| Situation | Status | Error code |
-| --- | ---: | --- |
-| Invalid body / blank text | 400 | `invalid_input` |
-| Kill switch disabled | 503 | `llm_disabled` |
-| Provider timeout | 504 | `provider_timeout` |
-| Provider rate limit | 429 | `provider_rate_limited` |
-| Provider 5xx/outage | 503 | `provider_unavailable` |
-| Invalid provider JSON/schema | 502 | `invalid_provider_output` |
-| Auth/client rejection | 502 | `provider_rejected` |
-| Unexpected internal failure | 500 | `unexpected_failure` |
-
-The response intentionally never includes provider headers, raw body, API keys, or stack traces.
-
 ## Verify
 
 ```bash
-PYTHONPATH=artifacts/flyrank-backend-assignment-6 uv run pytest artifacts/flyrank-backend-assignment-6/backend/tests -q
-PYTHONPATH=artifacts/flyrank-backend-assignment-6 uv run python -m backend.eval_runner
-pnpm --filter @workspace/flyrank-backend-assignment-6 run typecheck
+PYTHONPATH=artifacts/flyrank-backend-assignment-6 \
+python -m pytest artifacts/flyrank-backend-assignment-6/backend/tests -q
+
+cd artifacts/flyrank-backend-assignment-6
+PYTHONPATH=. python -m backend.eval_runner
 ```
 
-Read `docs/verification.md`, `docs/requirements-audit.md`, and `docs/source-gap-notes.md` for recorded evidence and boundaries.
+GitHub Actions runs the same backend contract checks plus a real local HTTP checkpoint using the deterministic provider.
 
-The verification evidence includes one genuine Replit AI Integrations checkpoint through `POST /llm/classify`, kept separate from the deterministic-stub evaluation and mocked adapter tests.
+## Existing live-provider evidence
 
-## Evaluation
+`docs/verification.md` records the previously executed genuine managed-provider request separately from deterministic tests. That evidence includes the real provider/model, HTTP result, validated classification, latency, and token usage without exposing credentials. It is not rewritten as a new live provider call by CI.
 
-`backend/eval_cases.json` contains 12 labeled examples covering all four categories and urgency levels. `backend/eval_runner.py` evaluates the selected adapter and writes observed results to `backend/eval_results.json`; it calculates accuracy from comparison results, not declared scores.
+## Repository layout note
 
-## S4 rematch
+The original Replit workspace contains frontend/tooling files around the assignment. The actual Assignment 6 submission is isolated under `artifacts/flyrank-backend-assignment-6/`; the root README points directly here so reviewers do not need to infer the submission path.
 
-The human-vs-AI S4 rematch comparison is explicitly **pending** until the separate human Assignment 6 exists. This project does not inspect or use that implementation.
+## AI Rematch
+
+This is the independent AI-generated implementation. The later human-vs-AI comparison remains a separate project stage and is not claimed complete here.

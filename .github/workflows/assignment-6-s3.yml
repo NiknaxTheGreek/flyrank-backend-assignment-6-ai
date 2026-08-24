@@ -1,0 +1,75 @@
+name: Assignment 6 S3 Gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "artifacts/flyrank-backend-assignment-6/backend/**"
+      - "artifacts/flyrank-backend-assignment-6/JOB-CARD.md"
+      - "artifacts/flyrank-backend-assignment-6/.env.example"
+      - ".github/workflows/assignment-6-s3.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "fastapi>=0.115" "httpx>=0.28" "pydantic>=2.10" "pytest>=8" "uvicorn>=0.30"
+
+      - name: Compile backend
+        run: python -m compileall -q artifacts/flyrank-backend-assignment-6/backend
+
+      - name: Run Assignment 6 contract tests
+        env:
+          PYTHONPATH: artifacts/flyrank-backend-assignment-6
+        run: python -m pytest artifacts/flyrank-backend-assignment-6/backend/tests -q
+
+      - name: Run labelled deterministic evaluation
+        env:
+          PYTHONPATH: artifacts/flyrank-backend-assignment-6
+        run: python -m backend.eval_runner
+        working-directory: artifacts/flyrank-backend-assignment-6
+
+      - name: Prove stub HTTP path
+        env:
+          PYTHONPATH: artifacts/flyrank-backend-assignment-6
+          LLM_MODE: stub
+          LLM_ENABLED: "true"
+        run: |
+          python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765 > /tmp/a6-api.log 2>&1 &
+          API_PID=$!
+          trap 'kill $API_PID || true' EXIT
+          for attempt in {1..20}; do
+            if curl -fsS http://127.0.0.1:8765/healthz >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          curl -fsS -X POST http://127.0.0.1:8765/llm/classify \
+            -H 'content-type: application/json' \
+            -d '{"text":"The app crashes when I open billing settings"}' \
+            | tee /tmp/a6-stub-response.json
+          python - <<'PY'
+          import json
+          payload=json.load(open('/tmp/a6-stub-response.json'))
+          assert payload['category'] == 'bug'
+          assert payload['metadata']['prompt_version'] == 'support-classifier-v1'
+          assert payload['metadata']['repair_attempted'] is False
+          print('STUB_HTTP_GATE=PASS')
+          PY

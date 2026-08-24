@@ -56,3 +56,5 @@ __pycache__/
 .env
 .env.*
 !.env.example
+runtime/
+artifacts/flyrank-backend-assignment-6/runtime/
