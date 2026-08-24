@@ -9,6 +9,7 @@ from typing import Any, Protocol
 import httpx
 
 from .models import Category, ProviderClassification, Urgency
+from .prompts import REPAIR_PROMPT, SYSTEM_PROMPT
 from .settings import Settings
 
 
@@ -24,6 +25,10 @@ class ProviderFailure(Exception):
 class ProviderOutputError(Exception):
     """Raised when an upstream response cannot satisfy our schema."""
 
+    def __init__(self, raw_output: str | None = None) -> None:
+        self.raw_output = raw_output
+        super().__init__("provider output was not valid structured JSON")
+
 
 @dataclass(frozen=True)
 class ProviderResponse:
@@ -37,6 +42,8 @@ class Provider(Protocol):
     model: str
 
     async def classify(self, text: str) -> ProviderResponse: ...
+
+    async def repair(self, text: str) -> ProviderResponse: ...
 
 
 class StubProvider:
@@ -76,6 +83,9 @@ class StubProvider:
             )
         )
 
+    async def repair(self, text: str) -> ProviderResponse:
+        return await self.classify(text)
+
 
 class OpenAIResponsesProvider:
     """OpenAI Responses API adapter using JSON Schema structured output."""
@@ -93,23 +103,21 @@ class OpenAIResponsesProvider:
         self._client = client
 
     async def classify(self, text: str) -> ProviderResponse:
+        return await self._request(text, repair=False)
+
+    async def repair(self, text: str) -> ProviderResponse:
+        return await self._request(text, repair=True)
+
+    async def _request(self, text: str, *, repair: bool) -> ProviderResponse:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        system_text = SYSTEM_PROMPT if not repair else f"{SYSTEM_PROMPT}\n\n{REPAIR_PROMPT}"
         payload = {
             "model": self.model,
             "input": [
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "Classify a customer-support message. Return only the required JSON. "
-                                "Category: billing, bug, feature, or other. "
-                                "Urgency: low, normal, or high. Reason must cite the message concisely."
-                            ),
-                        }
-                    ],
+                    "content": [{"type": "input_text", "text": system_text}],
                 },
                 {"role": "user", "content": [{"type": "input_text", "text": text}]},
             ],
@@ -158,6 +166,7 @@ class OpenAIResponsesProvider:
         if response.status_code >= 400:
             raise ProviderFailure("unexpected", response.status_code)
 
+        raw_text: str | None = None
         try:
             body = response.json()
             raw_text = _extract_output_text(body)
@@ -169,7 +178,7 @@ class OpenAIResponsesProvider:
                 output_tokens=_optional_int(usage.get("output_tokens")),
             )
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise ProviderOutputError("provider output was not valid structured JSON") from exc
+            raise ProviderOutputError(raw_text) from exc
 
 
 def _extract_output_text(body: dict[str, Any]) -> str:
