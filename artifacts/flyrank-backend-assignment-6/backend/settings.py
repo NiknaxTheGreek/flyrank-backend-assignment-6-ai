@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -24,6 +25,9 @@ class Settings:
     max_retries: int = 2
     retry_backoff_seconds: float = 0.15
     cache_ttl_seconds: float = 300.0
+    input_cost_per_million_usd: float = 0.0
+    output_cost_per_million_usd: float = 0.0
+    quarantine_path: Path = Path("runtime/quarantine/invalid-provider-output.jsonl")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -45,4 +49,16 @@ class Settings:
                 0.0, min(float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.15")), 2.0)
             ),
             cache_ttl_seconds=max(0.0, float(os.getenv("LLM_CACHE_TTL_SECONDS", "300"))),
+            input_cost_per_million_usd=max(
+                0.0, float(os.getenv("LLM_INPUT_COST_PER_MILLION_USD", "0"))
+            ),
+            output_cost_per_million_usd=max(
+                0.0, float(os.getenv("LLM_OUTPUT_COST_PER_MILLION_USD", "0"))
+            ),
+            quarantine_path=Path(
+                os.getenv(
+                    "LLM_QUARANTINE_PATH",
+                    "runtime/quarantine/invalid-provider-output.jsonl",
+                )
+            ),
         )
