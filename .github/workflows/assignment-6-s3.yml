@@ -8,8 +8,10 @@ on:
     branches: [main]
     paths:
       - "artifacts/flyrank-backend-assignment-6/backend/**"
+      - "artifacts/flyrank-backend-assignment-6/prompts/**"
       - "artifacts/flyrank-backend-assignment-6/JOB-CARD.md"
       - "artifacts/flyrank-backend-assignment-6/.env.example"
+      - "artifacts/flyrank-backend-assignment-6/README.md"
       - ".github/workflows/assignment-6-s3.yml"
 
 permissions:
@@ -44,7 +46,7 @@ jobs:
 
       - name: Run labelled deterministic evaluation
         env:
-          PYTHONPATH: artifacts/flyrank-backend-assignment-6
+          PYTHONPATH: .
         run: python -m backend.eval_runner
         working-directory: artifacts/flyrank-backend-assignment-6
 
@@ -63,7 +65,7 @@ jobs:
           done
           curl -fsS -X POST http://127.0.0.1:8765/llm/classify \
             -H 'content-type: application/json' \
-            -d '{"text":"The app crashes when I open billing settings"}' \
+            -d '{"text":"The app crashes when I open profile settings"}' \
             | tee /tmp/a6-stub-response.json
           python - <<'PY'
           import json
@@ -71,5 +73,6 @@ jobs:
           assert payload['category'] == 'bug'
           assert payload['metadata']['prompt_version'] == 'support-classifier-v1'
           assert payload['metadata']['repair_attempted'] is False
+          assert payload['metadata']['repair_count'] == 0
           print('STUB_HTTP_GATE=PASS')
           PY
