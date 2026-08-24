@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from .models import utc_now
 
 
 class QuarantineSink:
@@ -21,7 +20,7 @@ class QuarantineSink:
     def record(self, *, text: str, raw_output: str | None, attempt: int, prompt_version: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         entry: dict[str, Any] = {
-            "recorded_at": utc_now(),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
             "input_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "attempt": attempt,
             "prompt_version": prompt_version,
