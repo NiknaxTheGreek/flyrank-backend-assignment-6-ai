@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -27,13 +29,21 @@ class ScriptedProvider:
     def __init__(self, actions: list[object]) -> None:
         self.actions = actions
         self.calls = 0
+        self.repair_calls = 0
 
-    async def classify(self, _: str) -> ProviderResponse:
+    async def _next(self) -> ProviderResponse:
         self.calls += 1
         action = self.actions.pop(0)
         if isinstance(action, Exception):
             raise action
         return action
+
+    async def classify(self, _: str) -> ProviderResponse:
+        return await self._next()
+
+    async def repair(self, _: str) -> ProviderResponse:
+        self.repair_calls += 1
+        return await self._next()
 
 
 def good_response() -> ProviderResponse:
@@ -52,70 +62,138 @@ def good_response() -> ProviderResponse:
 def client_for(provider, **overrides) -> TestClient:
     settings = Settings(
         llm_enabled=overrides.get("llm_enabled", True),
-        llm_mode="stub",
+        llm_mode=overrides.get("llm_mode", "stub"),
+        openai_api_key=overrides.get("openai_api_key"),
         max_retries=overrides.get("max_retries", 2),
-        retry_backoff_seconds=0,
-        cache_ttl_seconds=60,
+        retry_backoff_seconds=overrides.get("retry_backoff_seconds", 0),
+        cache_ttl_seconds=overrides.get("cache_ttl_seconds", 60),
+        input_cost_per_million_usd=overrides.get("input_cost_per_million_usd", 0),
+        output_cost_per_million_usd=overrides.get("output_cost_per_million_usd", 0),
+        quarantine_path=overrides.get(
+            "quarantine_path", Path("runtime/test-quarantine.jsonl")
+        ),
     )
     service = ClassifierService(settings, provider)
     return TestClient(create_app(settings, service))
 
 
 def test_happy_path_and_metadata() -> None:
-    response = client_for(StubProvider()).post("/llm/classify", json={"text": "The app crashes"})
+    response = client_for(StubProvider()).post(
+        "/llm/classify", json={"text": "The app crashes"}
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["category"] == "bug"
     assert body["urgency"] == "normal"
     assert 0 <= body["confidence"] <= 1
     assert body["metadata"]["provider"] == "deterministic-stub"
+    assert body["metadata"]["prompt_version"] == "support-classifier-v1"
+    assert body["metadata"]["repair_attempted"] is False
 
 
 def test_validation_rejects_blank_and_unknown_fields() -> None:
     client = client_for(StubProvider())
     assert client.post("/llm/classify", json={"text": "  "}).status_code == 400
-    assert client.post("/llm/classify", json={"text": "hello", "extra": True}).status_code == 400
+    assert (
+        client.post("/llm/classify", json={"text": "hello", "extra": True}).status_code
+        == 400
+    )
 
 
-def test_structured_output_rejection() -> None:
-    response = client_for(ScriptedProvider([ProviderOutputError()])).post(
+def test_invalid_output_is_repaired_exactly_once(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [ProviderOutputError("not-json"), good_response()]
+    )
+    quarantine = tmp_path / "quarantine.jsonl"
+    response = client_for(provider, quarantine_path=quarantine).post(
         "/llm/classify", json={"text": "I need help"}
     )
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.json()["metadata"]["repair_attempted"] is True
+    assert provider.calls == 2
+    assert provider.repair_calls == 1
+    rows = [json.loads(line) for line in quarantine.read_text().splitlines()]
+    assert [row["attempt"] for row in rows] == [1]
+    assert rows[0]["raw_output"] == "not-json"
+    assert "I need help" not in quarantine.read_text()
+
+
+def test_second_invalid_output_returns_422_and_quarantines_both(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [ProviderOutputError("bad-one"), ProviderOutputError("bad-two")]
+    )
+    quarantine = tmp_path / "quarantine.jsonl"
+    response = client_for(provider, quarantine_path=quarantine).post(
+        "/llm/classify", json={"text": "I need help"}
+    )
+    assert response.status_code == 422
     assert response.json()["code"] == "invalid_provider_output"
+    assert provider.calls == 2
+    assert provider.repair_calls == 1
+    rows = [json.loads(line) for line in quarantine.read_text().splitlines()]
+    assert [row["attempt"] for row in rows] == [1, 2]
 
 
 def test_timeout_retries_then_reports_timeout() -> None:
-    provider = ScriptedProvider([ProviderFailure("timeout"), ProviderFailure("timeout"), ProviderFailure("timeout")])
-    response = client_for(provider).post("/llm/classify", json={"text": "I need help"})
+    provider = ScriptedProvider(
+        [
+            ProviderFailure("timeout"),
+            ProviderFailure("timeout"),
+            ProviderFailure("timeout"),
+        ]
+    )
+    response = client_for(provider).post(
+        "/llm/classify", json={"text": "I need help"}
+    )
     assert response.status_code == 504
     assert provider.calls == 3
 
 
 def test_transient_failure_retries() -> None:
     provider = ScriptedProvider([ProviderFailure("upstream", 503), good_response()])
-    response = client_for(provider).post("/llm/classify", json={"text": "I need help"})
+    response = client_for(provider).post(
+        "/llm/classify", json={"text": "I need help"}
+    )
     assert response.status_code == 200
     assert response.json()["metadata"]["retries"] == 1
     assert provider.calls == 2
 
 
-@pytest.mark.parametrize("status", [400, 401, 403])
-def test_non_retryable_client_failures_do_not_retry(status: int) -> None:
-    provider = ScriptedProvider([ProviderFailure("request_rejected", status), good_response()])
-    response = client_for(provider).post("/llm/classify", json={"text": "I need help"})
+@pytest.mark.parametrize("kind,status", [("request_rejected", 400), ("request_rejected", 401), ("request_rejected", 403), ("unexpected", 404)])
+def test_non_retryable_client_failures_do_not_retry(kind: str, status: int) -> None:
+    provider = ScriptedProvider([ProviderFailure(kind, status), good_response()])
+    response = client_for(provider).post(
+        "/llm/classify", json={"text": "I need help"}
+    )
     assert response.status_code == 502
     assert provider.calls == 1
 
 
 def test_kill_switch() -> None:
-    response = client_for(StubProvider(), llm_enabled=False).post("/llm/classify", json={"text": "I need help"})
+    response = client_for(StubProvider(), llm_enabled=False).post(
+        "/llm/classify", json={"text": "I need help"}
+    )
+    assert response.status_code == 503
+    assert response.json()["code"] == "llm_disabled"
+
+
+def test_kill_switch_allows_startup_without_provider_credentials() -> None:
+    settings = Settings(
+        llm_enabled=False,
+        llm_mode="openai",
+        openai_api_key=None,
+    )
+    client = TestClient(create_app(settings=settings))
+    assert client.get("/healthz").status_code == 200
+    response = client.post("/llm/classify", json={"text": "I need help"})
     assert response.status_code == 503
     assert response.json()["code"] == "llm_disabled"
 
 
 def test_stub_mode() -> None:
-    response = client_for(StubProvider()).post("/llm/classify", json={"text": "Please add calendar integration"})
+    response = client_for(StubProvider()).post(
+        "/llm/classify", json={"text": "Please add calendar integration"}
+    )
     assert response.status_code == 200
     assert response.json()["category"] == "feature"
 
@@ -130,10 +208,26 @@ def test_identical_input_is_cached() -> None:
     assert provider.calls == 1
 
 
+def test_usage_cost_metadata_and_safe_logging(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="backend.service")
+    response = client_for(
+        ScriptedProvider([good_response()]),
+        input_cost_per_million_usd=2.0,
+        output_cost_per_million_usd=8.0,
+    ).post("/llm/classify", json={"text": "secret customer sentence"})
+    assert response.status_code == 200
+    metadata = response.json()["metadata"]
+    assert metadata["input_tokens"] == 12
+    assert metadata["output_tokens"] == 9
+    assert metadata["estimated_cost_usd"] == 0.000096
+    assert "secret customer sentence" not in caplog.text
+    assert "prompt_version=support-classifier-v1" in caplog.text
+
+
 def test_secret_hygiene_no_key_in_responses() -> None:
-    response = client_for(ScriptedProvider([ProviderFailure("request_rejected", 401)])).post(
-        "/llm/classify", json={"text": "Bearer pretend-secret-value"}
-    )
+    response = client_for(
+        ScriptedProvider([ProviderFailure("request_rejected", 401)])
+    ).post("/llm/classify", json={"text": "Bearer pretend-secret-value"})
     assert "pretend-secret-value" not in response.text
 
 
@@ -143,7 +237,16 @@ def test_openai_adapter_rejects_malformed_structured_output() -> None:
             lambda _: httpx.Response(
                 200,
                 json={
-                    "output": [{"content": [{"type": "output_text", "text": '{"category":"not-allowed"}'}]}]
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"category":"not-allowed"}',
+                                }
+                            ]
+                        }
+                    ]
                 },
             )
         )
@@ -152,8 +255,9 @@ def test_openai_adapter_rejects_malformed_structured_output() -> None:
                 Settings(llm_mode="openai", openai_api_key="test-only-key"),
                 client=client,
             )
-            with pytest.raises(ProviderOutputError):
+            with pytest.raises(ProviderOutputError) as raised:
                 await provider.classify("A test support message")
+            assert raised.value.raw_output == '{"category":"not-allowed"}'
 
     asyncio.run(scenario())
 
@@ -161,7 +265,9 @@ def test_openai_adapter_rejects_malformed_structured_output() -> None:
 def test_managed_openai_environment_selects_replit_proxy(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("AI_INTEGRATIONS_OPENAI_API_KEY", "managed-test-key")
-    monkeypatch.setenv("AI_INTEGRATIONS_OPENAI_BASE_URL", "https://proxy.example/v1/")
+    monkeypatch.setenv(
+        "AI_INTEGRATIONS_OPENAI_BASE_URL", "https://proxy.example/v1/"
+    )
 
     settings = Settings.from_env()
 
@@ -171,9 +277,7 @@ def test_managed_openai_environment_selects_replit_proxy(monkeypatch) -> None:
 
 
 def test_source_does_not_hardcode_or_echo_api_key() -> None:
-    provider_source = (
-        Path(__file__).resolve().parents[1] / "providers.py"
-    ).read_text()
+    provider_source = (Path(__file__).resolve().parents[1] / "providers.py").read_text()
     example_env = Path(__file__).resolve().parents[2] / ".env.example"
     assert "sk-" not in provider_source
     assert "print(" not in provider_source
