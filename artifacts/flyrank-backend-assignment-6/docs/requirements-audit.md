@@ -23,7 +23,7 @@
 | Labelled evaluation | 12 labelled cases with generated observed results and accuracy calculations | PASS |
 | Deterministic automated coverage | expanded backend suite covers API, repair, quarantine, retries, kill switch, cache, adapter, logging and cost | PASS |
 | Root submission discoverability | root `README.md` points directly to the assignment artifact and verification command | PASS |
-| Current GitHub Actions checkpoint | `.github/workflows/assignment-6-s3.yml` runs compile, tests, evaluation and stub HTTP probe | PENDING CURRENT RUN |
+| Current GitHub Actions checkpoint | Run `32702780162`: compile PASS, 19 tests PASS, labelled evaluation executed, and real Uvicorn/stub HTTP probe printed `STUB_HTTP_GATE=PASS` | PASS |
 | AI Rematch comparison | deliberately separate; no human implementation is inspected or replaced here | PENDING HUMAN VERSION |
 
 The older live-provider checkpoint remains historical executed evidence. This repair does not claim that GitHub Actions made a fresh paid/managed provider request because no provider credential is exposed to the workflow.
