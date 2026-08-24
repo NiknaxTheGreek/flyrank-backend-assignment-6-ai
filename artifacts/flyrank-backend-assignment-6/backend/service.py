@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -32,6 +33,7 @@ class ClassifierService:
         sleep=asyncio.sleep,
         clock=time.monotonic,
         quarantine: QuarantineSink | None = None,
+        jitter_fn: Callable[[float, float], float] = random.uniform,
     ) -> None:
         self.settings = settings
         self.provider = provider
@@ -39,6 +41,7 @@ class ClassifierService:
         self._clock = clock
         self._cache: dict[str, _CacheEntry] = {}
         self._quarantine = quarantine or QuarantineSink(settings.quarantine_path)
+        self._jitter = jitter_fn
 
     async def classify(self, text: str) -> ClassificationResult:
         if not self.settings.llm_enabled:
@@ -53,25 +56,35 @@ class ClassifierService:
                 started,
                 cache_hit=True,
                 retries=0,
-                repair_attempted=False,
+                repair_count=0,
             )
         if cached:
             self._cache.pop(key, None)
 
-        repair_attempted = False
+        repair_count = 0
         total_retries = 0
         try:
-            response, retries = await self._call_with_retries(self.provider.classify, text)
+            response, retries = await self._call_with_retries(
+                self.provider.classify,
+                text,
+            )
             total_retries += retries
         except ProviderOutputError as first_error:
-            repair_attempted = True
+            repair_count = 1
             self._quarantine.record(
                 text=text,
                 raw_output=first_error.raw_output,
+                validation_error=first_error.validation_error,
                 attempt=1,
                 prompt_version=PROMPT_VERSION,
             )
-            repair = getattr(self.provider, "repair", self.provider.classify)
+
+            async def repair(value: str) -> ProviderResponse:
+                return await self.provider.repair(
+                    value,
+                    first_error.validation_error,
+                )
+
             try:
                 response, retries = await self._call_with_retries(repair, text)
                 total_retries += retries
@@ -79,6 +92,7 @@ class ClassifierService:
                 self._quarantine.record(
                     text=text,
                     raw_output=final_error.raw_output,
+                    validation_error=final_error.validation_error,
                     attempt=2,
                     prompt_version=PROMPT_VERSION,
                 )
@@ -94,7 +108,7 @@ class ClassifierService:
             started,
             cache_hit=False,
             retries=total_retries,
-            repair_attempted=repair_attempted,
+            repair_count=repair_count,
         )
 
     async def _call_with_retries(
@@ -110,7 +124,18 @@ class ClassifierService:
             except ProviderFailure as exc:
                 if not self._is_retryable(exc) or attempt == self.settings.max_retries:
                     raise
-                delay = min(self.settings.retry_backoff_seconds * (2**attempt), 2.0)
+                base_delay = min(
+                    self.settings.retry_backoff_seconds * (2**attempt),
+                    2.0,
+                )
+                jitter = (
+                    self._jitter(0.0, min(base_delay * 0.25, 0.5))
+                    if base_delay > 0
+                    else 0.0
+                )
+                delay = base_delay + jitter
+                if exc.retry_after_seconds is not None:
+                    delay = max(delay, exc.retry_after_seconds)
                 await self._sleep(delay)
         raise RuntimeError("unreachable")
 
@@ -134,7 +159,7 @@ class ClassifierService:
         *,
         cache_hit: bool,
         retries: int,
-        repair_attempted: bool,
+        repair_count: int,
     ) -> ClassificationResult:
         duration_ms = round((self._clock() - started) * 1000, 2)
         estimated_cost = self._estimated_cost(response)
@@ -145,20 +170,21 @@ class ClassifierService:
             duration_ms=duration_ms,
             cache_hit=cache_hit,
             retries=retries,
-            repair_attempted=repair_attempted,
+            repair_attempted=repair_count > 0,
+            repair_count=repair_count,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             estimated_cost_usd=estimated_cost,
         )
         logger.info(
-            "llm_classification provider=%s model=%s prompt_version=%s duration_ms=%s cache_hit=%s retries=%s repair_attempted=%s input_tokens=%s output_tokens=%s estimated_cost_usd=%s",
+            "llm_classification provider=%s model=%s prompt_version=%s duration_ms=%s cache_hit=%s retries=%s repair_count=%s input_tokens=%s output_tokens=%s estimated_cost_usd=%s",
             metadata.provider,
             metadata.model,
             metadata.prompt_version,
             metadata.duration_ms,
             metadata.cache_hit,
             metadata.retries,
-            metadata.repair_attempted,
+            metadata.repair_count,
             metadata.input_tokens,
             metadata.output_tokens,
             metadata.estimated_cost_usd,

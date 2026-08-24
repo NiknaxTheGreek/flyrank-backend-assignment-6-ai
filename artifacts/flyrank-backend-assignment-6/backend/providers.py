@@ -7,26 +7,38 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+from pydantic import ValidationError
 
 from .models import Category, ProviderClassification, Urgency
-from .prompts import REPAIR_PROMPT, SYSTEM_PROMPT
+from .prompts import SYSTEM_PROMPT, build_repair_prompt
 from .settings import Settings
 
 
 class ProviderFailure(Exception):
     """A sanitized provider failure suitable for public error mapping."""
 
-    def __init__(self, kind: str, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        kind: str,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         self.kind = kind
         self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(kind)
 
 
 class ProviderOutputError(Exception):
     """Raised when an upstream response cannot satisfy our schema."""
 
-    def __init__(self, raw_output: str | None = None) -> None:
+    def __init__(
+        self,
+        raw_output: str | None = None,
+        validation_error: str = "schema validation failed",
+    ) -> None:
         self.raw_output = raw_output
+        self.validation_error = validation_error
         super().__init__("provider output was not valid structured JSON")
 
 
@@ -43,7 +55,7 @@ class Provider(Protocol):
 
     async def classify(self, text: str) -> ProviderResponse: ...
 
-    async def repair(self, text: str) -> ProviderResponse: ...
+    async def repair(self, text: str, validation_error: str) -> ProviderResponse: ...
 
 
 class StubProvider:
@@ -54,13 +66,22 @@ class StubProvider:
 
     async def classify(self, text: str) -> ProviderResponse:
         message = text.lower()
-        if any(token in message for token in ("charged", "charge", "invoice", "refund", "payment", "card")):
+        if any(
+            token in message
+            for token in ("charged", "charge", "invoice", "refund", "payment", "card")
+        ):
             category = Category.BILLING
             reason = "The message describes a payment, charge, invoice, or refund concern."
-        elif any(token in message for token in ("crash", "error", "broken", "not work", "bug", "fails")):
+        elif any(
+            token in message
+            for token in ("crash", "error", "broken", "not work", "bug", "fails")
+        ):
             category = Category.BUG
             reason = "The message reports broken or failing product behavior."
-        elif any(token in message for token in ("feature", "add", "would love", "please support", "integration")):
+        elif any(
+            token in message
+            for token in ("feature", "add", "would love", "please support", "integration")
+        ):
             category = Category.FEATURE
             reason = "The message asks for new or expanded product capability."
         else:
@@ -69,7 +90,10 @@ class StubProvider:
 
         urgency = (
             Urgency.HIGH
-            if any(token in message for token in ("urgent", "asap", "immediately", "locked out", "cannot access"))
+            if any(
+                token in message
+                for token in ("urgent", "asap", "immediately", "locked out", "cannot access")
+            )
             else Urgency.LOW
             if any(token in message for token in ("when you can", "no rush", "curious"))
             else Urgency.NORMAL
@@ -83,8 +107,23 @@ class StubProvider:
             )
         )
 
-    async def repair(self, text: str) -> ProviderResponse:
+    async def repair(self, text: str, validation_error: str) -> ProviderResponse:
         return await self.classify(text)
+
+
+class MisconfiguredProvider:
+    """Allows the API to start and fail predictably when live config is absent."""
+
+    name = "openai"
+
+    def __init__(self, settings: Settings) -> None:
+        self.model = settings.openai_model
+
+    async def classify(self, text: str) -> ProviderResponse:
+        raise ProviderFailure("misconfigured")
+
+    async def repair(self, text: str, validation_error: str) -> ProviderResponse:
+        raise ProviderFailure("misconfigured")
 
 
 class OpenAIResponsesProvider:
@@ -103,23 +142,37 @@ class OpenAIResponsesProvider:
         self._client = client
 
     async def classify(self, text: str) -> ProviderResponse:
-        return await self._request(text, repair=False)
+        return await self._request(text, repair_validation_error=None)
 
-    async def repair(self, text: str) -> ProviderResponse:
-        return await self._request(text, repair=True)
+    async def repair(self, text: str, validation_error: str) -> ProviderResponse:
+        return await self._request(text, repair_validation_error=validation_error)
 
-    async def _request(self, text: str, *, repair: bool) -> ProviderResponse:
+    async def _request(
+        self,
+        text: str,
+        *,
+        repair_validation_error: str | None,
+    ) -> ProviderResponse:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
-        system_text = SYSTEM_PROMPT if not repair else f"{SYSTEM_PROMPT}\n\n{REPAIR_PROMPT}"
+        system_text = SYSTEM_PROMPT
+        if repair_validation_error is not None:
+            system_text = (
+                f"{SYSTEM_PROMPT}\n\n"
+                f"{build_repair_prompt(repair_validation_error)}"
+            )
         payload = {
             "model": self.model,
+            "temperature": 0,
             "input": [
                 {
                     "role": "system",
                     "content": [{"type": "input_text", "text": system_text}],
                 },
-                {"role": "user", "content": [{"type": "input_text", "text": text}]},
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
             ],
             "text": {
                 "format": {
@@ -131,10 +184,24 @@ class OpenAIResponsesProvider:
                         "additionalProperties": False,
                         "required": ["category", "urgency", "confidence", "reason"],
                         "properties": {
-                            "category": {"type": "string", "enum": [item.value for item in Category]},
-                            "urgency": {"type": "string", "enum": [item.value for item in Urgency]},
-                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                            "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+                            "category": {
+                                "type": "string",
+                                "enum": [item.value for item in Category],
+                            },
+                            "urgency": {
+                                "type": "string",
+                                "enum": [item.value for item in Urgency],
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
+                            "reason": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 240,
+                            },
                         },
                     },
                 }
@@ -157,12 +224,15 @@ class OpenAIResponsesProvider:
             if owns_client:
                 await client.aclose()
 
+        retry_after = _retry_after_seconds(response)
         if response.status_code == 429:
-            raise ProviderFailure("rate_limited", 429)
+            raise ProviderFailure("rate_limited", 429, retry_after)
         if response.status_code >= 500:
-            raise ProviderFailure("upstream", response.status_code)
-        if response.status_code in {400, 401, 403}:
-            raise ProviderFailure("request_rejected", response.status_code)
+            raise ProviderFailure("upstream", response.status_code, retry_after)
+        if response.status_code in {401, 403}:
+            raise ProviderFailure("auth_rejected", response.status_code)
+        if response.status_code == 400:
+            raise ProviderFailure("request_rejected", 400)
         if response.status_code >= 400:
             raise ProviderFailure("unexpected", response.status_code)
 
@@ -177,14 +247,19 @@ class OpenAIResponsesProvider:
                 input_tokens=_optional_int(usage.get("input_tokens")),
                 output_tokens=_optional_int(usage.get("output_tokens")),
             )
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise ProviderOutputError(raw_text) from exc
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ProviderOutputError(
+                raw_output=raw_text,
+                validation_error=str(exc)[:1500],
+            ) from exc
 
 
 def _extract_output_text(body: dict[str, Any]) -> str:
     for item in body.get("output", []):
         for content in item.get("content", []):
-            if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+            if content.get("type") == "output_text" and isinstance(
+                content.get("text"), str
+            ):
                 return content["text"]
     raise ValueError("no output text present")
 
@@ -193,9 +268,22 @@ def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) and value >= 0 else None
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    return max(0.0, min(seconds, 60.0))
+
+
 def build_provider(settings: Settings) -> Provider:
     if settings.llm_mode == "stub":
         return StubProvider()
     if settings.llm_mode == "openai":
+        if not settings.openai_api_key:
+            return MisconfiguredProvider(settings)
         return OpenAIResponsesProvider(settings)
     raise ProviderFailure("misconfigured")

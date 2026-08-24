@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import create_app
 from backend.models import Category, ProviderClassification, Urgency
+from backend.prompts import PROMPT_PATH, SYSTEM_PROMPT
 from backend.providers import (
     OpenAIResponsesProvider,
     ProviderFailure,
@@ -30,6 +31,7 @@ class ScriptedProvider:
         self.actions = actions
         self.calls = 0
         self.repair_calls = 0
+        self.repair_errors: list[str] = []
 
     async def _next(self) -> ProviderResponse:
         self.calls += 1
@@ -41,8 +43,9 @@ class ScriptedProvider:
     async def classify(self, _: str) -> ProviderResponse:
         return await self._next()
 
-    async def repair(self, _: str) -> ProviderResponse:
+    async def repair(self, _: str, validation_error: str) -> ProviderResponse:
         self.repair_calls += 1
+        self.repair_errors.append(validation_error)
         return await self._next()
 
 
@@ -73,7 +76,12 @@ def client_for(provider, **overrides) -> TestClient:
             "quarantine_path", Path("runtime/test-quarantine.jsonl")
         ),
     )
-    service = ClassifierService(settings, provider)
+    kwargs = {}
+    if "sleep" in overrides:
+        kwargs["sleep"] = overrides["sleep"]
+    if "jitter_fn" in overrides:
+        kwargs["jitter_fn"] = overrides["jitter_fn"]
+    service = ClassifierService(settings, provider, **kwargs)
     return TestClient(create_app(settings, service))
 
 
@@ -89,6 +97,7 @@ def test_happy_path_and_metadata() -> None:
     assert body["metadata"]["provider"] == "deterministic-stub"
     assert body["metadata"]["prompt_version"] == "support-classifier-v1"
     assert body["metadata"]["repair_attempted"] is False
+    assert body["metadata"]["repair_count"] == 0
 
 
 def test_validation_rejects_blank_and_unknown_fields() -> None:
@@ -100,9 +109,25 @@ def test_validation_rejects_blank_and_unknown_fields() -> None:
     )
 
 
-def test_invalid_output_is_repaired_exactly_once(tmp_path: Path) -> None:
+def test_versioned_prompt_contains_all_five_required_parts_and_examples() -> None:
+    assert PROMPT_PATH.name == "support-classifier-v1.md"
+    assert "## 1. Role / job" in SYSTEM_PROMPT
+    assert "## 2. Exact output structure" in SYSTEM_PROMPT
+    assert "## 3. Rules" in SYSTEM_PROMPT
+    assert "## 4. Uncertainty behaviour" in SYSTEM_PROMPT
+    assert "## 5. Examples" in SYSTEM_PROMPT
+    assert SYSTEM_PROMPT.count("### Example") == 3
+    assert "untrusted data" in SYSTEM_PROMPT
+
+
+def test_invalid_output_is_repaired_exactly_once_using_validation_error(
+    tmp_path: Path,
+) -> None:
     provider = ScriptedProvider(
-        [ProviderOutputError("not-json"), good_response()]
+        [
+            ProviderOutputError("not-json", "invalid JSON at line 1"),
+            good_response(),
+        ]
     )
     quarantine = tmp_path / "quarantine.jsonl"
     response = client_for(provider, quarantine_path=quarantine).post(
@@ -110,17 +135,23 @@ def test_invalid_output_is_repaired_exactly_once(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert response.json()["metadata"]["repair_attempted"] is True
+    assert response.json()["metadata"]["repair_count"] == 1
     assert provider.calls == 2
     assert provider.repair_calls == 1
+    assert provider.repair_errors == ["invalid JSON at line 1"]
     rows = [json.loads(line) for line in quarantine.read_text().splitlines()]
     assert [row["attempt"] for row in rows] == [1]
     assert rows[0]["raw_output"] == "not-json"
+    assert rows[0]["validation_error"] == "invalid JSON at line 1"
     assert "I need help" not in quarantine.read_text()
 
 
 def test_second_invalid_output_returns_422_and_quarantines_both(tmp_path: Path) -> None:
     provider = ScriptedProvider(
-        [ProviderOutputError("bad-one"), ProviderOutputError("bad-two")]
+        [
+            ProviderOutputError("bad-one", "first schema error"),
+            ProviderOutputError("bad-two", "second schema error"),
+        ]
     )
     quarantine = tmp_path / "quarantine.jsonl"
     response = client_for(provider, quarantine_path=quarantine).post(
@@ -132,6 +163,10 @@ def test_second_invalid_output_returns_422_and_quarantines_both(tmp_path: Path) 
     assert provider.repair_calls == 1
     rows = [json.loads(line) for line in quarantine.read_text().splitlines()]
     assert [row["attempt"] for row in rows] == [1, 2]
+    assert [row["validation_error"] for row in rows] == [
+        "first schema error",
+        "second schema error",
+    ]
 
 
 def test_timeout_retries_then_reports_timeout() -> None:
@@ -159,13 +194,54 @@ def test_transient_failure_retries() -> None:
     assert provider.calls == 2
 
 
-@pytest.mark.parametrize("kind,status", [("request_rejected", 400), ("request_rejected", 401), ("request_rejected", 403), ("unexpected", 404)])
-def test_non_retryable_client_failures_do_not_retry(kind: str, status: int) -> None:
+def test_retry_after_is_honoured_and_jitter_is_applied() -> None:
+    async def scenario() -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        provider = ScriptedProvider(
+            [ProviderFailure("rate_limited", 429, 1.25), good_response()]
+        )
+        settings = Settings(
+            retry_backoff_seconds=0.4,
+            max_retries=1,
+            cache_ttl_seconds=0,
+        )
+        service = ClassifierService(
+            settings,
+            provider,
+            sleep=fake_sleep,
+            jitter_fn=lambda low, high: high,
+        )
+        result = await service.classify("I need help")
+        assert result.metadata.retries == 1
+        assert sleeps == [1.25]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "kind,status,expected_code",
+    [
+        ("request_rejected", 400, "provider_rejected"),
+        ("auth_rejected", 401, "provider_auth_failed"),
+        ("auth_rejected", 403, "provider_auth_failed"),
+        ("unexpected", 404, "provider_failure"),
+    ],
+)
+def test_non_retryable_client_failures_do_not_retry(
+    kind: str,
+    status: int,
+    expected_code: str,
+) -> None:
     provider = ScriptedProvider([ProviderFailure(kind, status), good_response()])
     response = client_for(provider).post(
         "/llm/classify", json={"text": "I need help"}
     )
     assert response.status_code == 502
+    assert response.json()["code"] == expected_code
     assert provider.calls == 1
 
 
@@ -188,6 +264,19 @@ def test_kill_switch_allows_startup_without_provider_credentials() -> None:
     response = client.post("/llm/classify", json={"text": "I need help"})
     assert response.status_code == 503
     assert response.json()["code"] == "llm_disabled"
+
+
+def test_enabled_openai_without_credentials_starts_and_returns_controlled_503() -> None:
+    settings = Settings(
+        llm_enabled=True,
+        llm_mode="openai",
+        openai_api_key=None,
+    )
+    client = TestClient(create_app(settings=settings))
+    assert client.get("/healthz").status_code == 200
+    response = client.post("/llm/classify", json={"text": "I need help"})
+    assert response.status_code == 503
+    assert response.json()["code"] == "provider_misconfigured"
 
 
 def test_stub_mode() -> None:
@@ -222,19 +311,23 @@ def test_usage_cost_metadata_and_safe_logging(caplog: pytest.LogCaptureFixture) 
     assert metadata["estimated_cost_usd"] == 0.000096
     assert "secret customer sentence" not in caplog.text
     assert "prompt_version=support-classifier-v1" in caplog.text
+    assert "repair_count=0" in caplog.text
 
 
 def test_secret_hygiene_no_key_in_responses() -> None:
     response = client_for(
-        ScriptedProvider([ProviderFailure("request_rejected", 401)])
+        ScriptedProvider([ProviderFailure("auth_rejected", 401)])
     ).post("/llm/classify", json={"text": "Bearer pretend-secret-value"})
     assert "pretend-secret-value" not in response.text
 
 
-def test_openai_adapter_rejects_malformed_structured_output() -> None:
+def test_openai_adapter_rejects_malformed_structured_output_and_uses_low_temperature() -> None:
     async def scenario() -> None:
-        transport = httpx.MockTransport(
-            lambda _: httpx.Response(
+        seen_payloads: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payloads.append(json.loads(request.content))
+            return httpx.Response(
                 200,
                 json={
                     "output": [
@@ -249,7 +342,8 @@ def test_openai_adapter_rejects_malformed_structured_output() -> None:
                     ]
                 },
             )
-        )
+
+        transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             provider = OpenAIResponsesProvider(
                 Settings(llm_mode="openai", openai_api_key="test-only-key"),
@@ -258,6 +352,32 @@ def test_openai_adapter_rejects_malformed_structured_output() -> None:
             with pytest.raises(ProviderOutputError) as raised:
                 await provider.classify("A test support message")
             assert raised.value.raw_output == '{"category":"not-allowed"}'
+            assert raised.value.validation_error
+        payload = seen_payloads[0]
+        assert payload["temperature"] == 0
+        assert payload["input"][0]["role"] == "system"
+        assert payload["input"][1] == {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "A test support message"}],
+        }
+
+    asyncio.run(scenario())
+
+
+def test_openai_adapter_carries_retry_after_on_429() -> None:
+    async def scenario() -> None:
+        transport = httpx.MockTransport(
+            lambda _: httpx.Response(429, headers={"Retry-After": "2.5"})
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAIResponsesProvider(
+                Settings(llm_mode="openai", openai_api_key="test-only-key"),
+                client=client,
+            )
+            with pytest.raises(ProviderFailure) as raised:
+                await provider.classify("A test support message")
+            assert raised.value.kind == "rate_limited"
+            assert raised.value.retry_after_seconds == 2.5
 
     asyncio.run(scenario())
 
@@ -274,6 +394,11 @@ def test_managed_openai_environment_selects_replit_proxy(monkeypatch) -> None:
     assert settings.openai_api_key == "managed-test-key"
     assert settings.openai_base_url == "https://proxy.example/v1"
     assert settings.openai_provider_name == "replit-ai-integrations-openai"
+
+
+def test_timeout_environment_is_capped_at_sixty_seconds(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "600")
+    assert Settings.from_env().timeout_seconds == 60.0
 
 
 def test_source_does_not_hardcode_or_echo_api_key() -> None:

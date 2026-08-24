@@ -61,6 +61,7 @@ class OperationalMetadata(BaseModel):
     cache_hit: bool
     retries: int = Field(ge=0)
     repair_attempted: bool = False
+    repair_count: int = Field(default=0, ge=0, le=1)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     estimated_cost_usd: float | None = Field(default=None, ge=0)

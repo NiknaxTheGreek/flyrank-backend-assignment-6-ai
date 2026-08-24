@@ -43,17 +43,26 @@ class Settings:
                 "replit-ai-integrations-openai" if managed_base_url else "openai"
             ),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip(),
-            timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+            timeout_seconds=max(
+                0.1,
+                min(float(os.getenv("LLM_TIMEOUT_SECONDS", "30")), 60.0),
+            ),
             max_retries=max(0, min(int(os.getenv("LLM_MAX_RETRIES", "2")), 4)),
             retry_backoff_seconds=max(
-                0.0, min(float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.15")), 2.0)
+                0.0,
+                min(float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.15")), 2.0),
             ),
-            cache_ttl_seconds=max(0.0, float(os.getenv("LLM_CACHE_TTL_SECONDS", "300"))),
+            cache_ttl_seconds=max(
+                0.0,
+                float(os.getenv("LLM_CACHE_TTL_SECONDS", "300")),
+            ),
             input_cost_per_million_usd=max(
-                0.0, float(os.getenv("LLM_INPUT_COST_PER_MILLION_USD", "0"))
+                0.0,
+                float(os.getenv("LLM_INPUT_COST_PER_MILLION_USD", "0")),
             ),
             output_cost_per_million_usd=max(
-                0.0, float(os.getenv("LLM_OUTPUT_COST_PER_MILLION_USD", "0"))
+                0.0,
+                float(os.getenv("LLM_OUTPUT_COST_PER_MILLION_USD", "0")),
             ),
             quarantine_path=Path(
                 os.getenv(
