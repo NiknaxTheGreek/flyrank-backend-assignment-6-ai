@@ -12,26 +12,38 @@ from .service import ClassifierService
 from .settings import Settings
 
 
-def create_app(settings: Settings | None = None, service: ClassifierService | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    service: ClassifierService | None = None,
+) -> FastAPI:
     active_settings = settings or Settings.from_env()
     if service is not None:
         active_service = service
     elif not active_settings.llm_enabled:
         # The kill switch must allow the API to start even when a live provider
-        # is intentionally unconfigured. classify() will return the controlled
-        # llm_disabled response before this inert provider is ever called.
+        # is intentionally unconfigured. classify() returns before this inert
+        # provider is called.
         active_service = ClassifierService(active_settings, StubProvider())
     else:
-        active_service = ClassifierService(active_settings, build_provider(active_settings))
+        active_service = ClassifierService(
+            active_settings,
+            build_provider(active_settings),
+        )
 
-    app = FastAPI(title="FlyRank Assignment 6", version="1.1.0")
+    app = FastAPI(title="FlyRank Assignment 6", version="1.2.0")
     app.state.classifier = active_service
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
+    async def validation_error(
+        _: Request,
+        __: RequestValidationError,
+    ) -> JSONResponse:
         return JSONResponse(
             status_code=400,
-            content=ErrorResponse(error="invalid request body", code="invalid_input").model_dump(),
+            content=ErrorResponse(
+                error="invalid request body",
+                code="invalid_input",
+            ).model_dump(),
         )
 
     @app.exception_handler(ProviderOutputError)
@@ -47,12 +59,37 @@ def create_app(settings: Settings | None = None, service: ClassifierService | No
     @app.exception_handler(ProviderFailure)
     async def provider_error(_: Request, exc: ProviderFailure) -> JSONResponse:
         status, message, code = {
-            "disabled": (503, "LLM classification is currently disabled", "llm_disabled"),
+            "disabled": (
+                503,
+                "LLM classification is currently disabled",
+                "llm_disabled",
+            ),
             "timeout": (504, "provider timed out", "provider_timeout"),
-            "rate_limited": (429, "provider rate limit reached", "provider_rate_limited"),
-            "upstream": (503, "provider is temporarily unavailable", "provider_unavailable"),
-            "request_rejected": (502, "provider rejected the request", "provider_rejected"),
-            "misconfigured": (503, "LLM provider is not configured", "provider_misconfigured"),
+            "rate_limited": (
+                429,
+                "provider rate limit reached",
+                "provider_rate_limited",
+            ),
+            "upstream": (
+                503,
+                "provider is temporarily unavailable",
+                "provider_unavailable",
+            ),
+            "auth_rejected": (
+                502,
+                "provider authentication failed",
+                "provider_auth_failed",
+            ),
+            "request_rejected": (
+                502,
+                "provider rejected the request",
+                "provider_rejected",
+            ),
+            "misconfigured": (
+                503,
+                "LLM provider is not configured",
+                "provider_misconfigured",
+            ),
         }.get(exc.kind, (502, "provider request failed", "provider_failure"))
         return JSONResponse(
             status_code=status,
@@ -63,7 +100,10 @@ def create_app(settings: Settings | None = None, service: ClassifierService | No
     async def unexpected_error(_: Request, __: Exception) -> JSONResponse:
         return JSONResponse(
             status_code=500,
-            content=ErrorResponse(error="unexpected service failure", code="unexpected_failure").model_dump(),
+            content=ErrorResponse(
+                error="unexpected service failure",
+                code="unexpected_failure",
+            ).model_dump(),
         )
 
     @app.get("/healthz")
@@ -83,7 +123,11 @@ def create_app(settings: Settings | None = None, service: ClassifierService | No
             504: {"model": ErrorResponse},
         },
     )
-    @app.post("/api/llm/classify", response_model=ClassificationResult, include_in_schema=False)
+    @app.post(
+        "/api/llm/classify",
+        response_model=ClassificationResult,
+        include_in_schema=False,
+    )
     async def classify(message: SupportMessageInput) -> ClassificationResult:
         return await app.state.classifier.classify(message.text)
 
