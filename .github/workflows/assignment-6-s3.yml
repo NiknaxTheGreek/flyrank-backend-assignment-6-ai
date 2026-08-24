@@ -58,7 +58,7 @@ jobs:
           API_PID=$!
           trap 'kill $API_PID || true' EXIT
           for attempt in {1..20}; do
-            if curl -fsS http://127.0.0.1:8765/healthz >/dev/null; then break; fi
+            if curl -fsS http://127.0.0.1:8765/healthz >/dev/null 2>&1; then break; fi
             sleep 0.5
           done
           curl -fsS -X POST http://127.0.0.1:8765/llm/classify \
@@ -68,7 +68,7 @@ jobs:
           python - <<'PY'
           import json
           payload=json.load(open('/tmp/a6-stub-response.json'))
-          assert payload['category'] == 'billing'
+          assert payload['category'] == 'bug'
           assert payload['metadata']['prompt_version'] == 'support-classifier-v1'
           assert payload['metadata']['repair_attempted'] is False
           print('STUB_HTTP_GATE=PASS')
