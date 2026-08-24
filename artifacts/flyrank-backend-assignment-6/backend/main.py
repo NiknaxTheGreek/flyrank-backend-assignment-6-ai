@@ -7,15 +7,24 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .models import ClassificationResult, ErrorResponse, SupportMessageInput
-from .providers import ProviderFailure, ProviderOutputError, build_provider
+from .providers import ProviderFailure, ProviderOutputError, StubProvider, build_provider
 from .service import ClassifierService
 from .settings import Settings
 
 
 def create_app(settings: Settings | None = None, service: ClassifierService | None = None) -> FastAPI:
     active_settings = settings or Settings.from_env()
-    active_service = service or ClassifierService(active_settings, build_provider(active_settings))
-    app = FastAPI(title="FlyRank Assignment 6", version="1.0.0")
+    if service is not None:
+        active_service = service
+    elif not active_settings.llm_enabled:
+        # The kill switch must allow the API to start even when a live provider
+        # is intentionally unconfigured. classify() will return the controlled
+        # llm_disabled response before this inert provider is ever called.
+        active_service = ClassifierService(active_settings, StubProvider())
+    else:
+        active_service = ClassifierService(active_settings, build_provider(active_settings))
+
+    app = FastAPI(title="FlyRank Assignment 6", version="1.1.0")
     app.state.classifier = active_service
 
     @app.exception_handler(RequestValidationError)
@@ -28,9 +37,10 @@ def create_app(settings: Settings | None = None, service: ClassifierService | No
     @app.exception_handler(ProviderOutputError)
     async def invalid_output(_: Request, __: ProviderOutputError) -> JSONResponse:
         return JSONResponse(
-            status_code=502,
+            status_code=422,
             content=ErrorResponse(
-                error="provider returned invalid structured output", code="invalid_provider_output"
+                error="provider output remained invalid after one repair attempt",
+                code="invalid_provider_output",
             ).model_dump(),
         )
 
@@ -66,6 +76,7 @@ def create_app(settings: Settings | None = None, service: ClassifierService | No
         response_model=ClassificationResult,
         responses={
             400: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
             429: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
